@@ -3,6 +3,7 @@ import {ApiPromise, WsProvider, Keyring} from '@polkadot/api';
 import {u8aConcat, hexFixLength} from '@polkadot/util';
 import 'dotenv/config';
 import {contracts} from "./compile.js";
+import ora from 'ora';
 
 const {log} = console;
 
@@ -22,7 +23,7 @@ const tokens = {
     VEN: {
         id: {
             moonbase: '0xCdF746C5C86Df2c2772d2D36E227B4c0203CbA25',
-            basilisk: 2
+            basilisk: 3
         },
     },
 };
@@ -89,7 +90,10 @@ const eventFilter = name => ({event: {section, method}}) => name === `${section}
 
 const onEvent = (name, chain, callback) => chain.api.query.system.events(events =>
     events.filter(eventFilter(name))
-        .forEach(event => callback(event, events.filter(e => e.phase.isApplyExtrinsic && e.phase.asApplyExtrinsic.eq(event.phase.asApplyExtrinsic)))));
+        .forEach(event => callback(
+            event,
+            events.filter(e => e.phase.isApplyExtrinsic && e.phase.asApplyExtrinsic.eq(event.phase.asApplyExtrinsic))
+        )));
 
 const onceEvent = (name, chain = chains.basilisk, predicate = () => true) =>
     new Promise(async resolve => {
@@ -113,7 +117,13 @@ const encodeDestination = ({parachain, address}, registry = chains.basilisk.api.
 });
 
 async function transferFromMoonbeam({token, amount, to}) {
-    const tx = await chains.moonbeam.Xtokens.transfer(token.id.moonbase, amount, encodeDestination(to), '0xee6b2800', {gasLimit: '100000'});
+    const tx = await chains.moonbeam.Xtokens.transfer(
+        token.id.moonbase,
+        amount,
+        encodeDestination(to),
+        '4000000000',
+        {gasLimit: '100000'}
+    );
     log('tx sent', tx.hash);
     const execution = await onceEvent('ethereum.Executed', chains.moonbeam, ([, , hash]) => hash.toHex() === tx.hash);
     const xcmpMessage = execution.siblings.find(eventFilter('xcmpQueue.XcmpMessageSent'))?.event.data[0].toHex();
