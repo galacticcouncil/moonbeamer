@@ -50,7 +50,7 @@ async function connect() {
             const account = keyring.addFromUri(process.env.PHRASE);
             chains.basilisk = {...chains.basilisk, api, account, keyring};
             balance.basilisk = {
-                account: account.address,
+                address: account.address,
                 DEV: Number(await freeTokenBalance(account.address, tokens.DEV))
             };
             log('connected to', chains.basilisk.rpc);
