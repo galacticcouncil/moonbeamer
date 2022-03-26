@@ -104,7 +104,7 @@ const encodeDestination = ({parachain, address}) => {
     }
 };
 
-async function transferToParachain({token, amount, to}) {
+async function transferFromMoonbeam({token, amount, to}) {
     const tx = await chains.moonbeam.Xtokens.transfer(token.id.moonbase, amount, encodeDestination(to), '0xee6b2800');
     log('tx sent', tx.hash);
     const xcmpMessage = await onceEvent('ethereum.Executed', chains.moonbeam, ([, , hash]) => hash.toHex() === tx.hash)
@@ -126,7 +126,7 @@ async function main() {
         }
     }
     await Promise.all([
-        transferToParachain(transfer).then(events => log('deposited', events.find(eventFilter('currencies.Deposited')).event.data[2].toString())),
+        transferFromMoonbeam(transfer).then(events => log('deposited', events.find(eventFilter('currencies.Deposited')).event.data[2].toString())),
         onceBalanceChange(transfer.to.address, transfer.token).then(free => log('new balance', free.toString()))
     ]);
 }
