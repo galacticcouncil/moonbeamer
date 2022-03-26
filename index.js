@@ -4,7 +4,7 @@ import {u8aConcat, hexFixLength} from '@polkadot/util';
 import 'dotenv/config';
 import {contracts} from "./compile.js";
 
-const log = console.log;
+const {log} = console;
 
 const tokens = {
     DEV: {
@@ -27,23 +27,24 @@ async function connect() {
     console.warn = () => null;
     let balance = {};
     await Promise.all([
-        async function() {
+        async function () {
             const api = await ApiPromise.create({provider: new WsProvider(chains.moonbeam.rpc)});
             chains.moonbeam = {...chains.moonbeam, api};
             log('connected to', chains.moonbeam.rpc);
         }(),
-        async function() {
+        async function () {
             const api = await ApiPromise.create({provider: new WsProvider(chains.basilisk.rpc)});
             const keyring = new Keyring({type: 'sr25519'});
             const account = keyring.addFromUri(process.env.PHRASE);
+            const {address} = account;
             chains.basilisk = {...chains.basilisk, api, account, keyring};
             balance.basilisk = {
-                address: account.address,
-                DEV: Number(await freeTokenBalance(account.address, tokens.DEV))
+                address,
+                DEV: Number(await freeTokenBalance(account, tokens.DEV))
             };
             log('connected to', chains.basilisk.rpc);
         }(),
-        async function() {
+        async function () {
             const provider = new ethers.providers.StaticJsonRpcProvider(chains.moonbeam.ethRpc, chains.moonbeam);
             const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
             const {Xtokens: {abi}} = contracts('Xtokens.sol');
@@ -73,15 +74,15 @@ const onceBalanceChange = async (address, token) => new Promise(async resolve =>
     });
 });
 
-const eventFilter = event => ({event: {section, method}}) => event === `${section}.${method}`
+const eventFilter = name => ({event: {section, method}}) => name === `${section}.${method}`
 
-const onEvent = (event, chain, callback) => chain.api.query.system.events(events =>
-    events.filter(eventFilter(event))
+const onEvent = (name, chain, callback) => chain.api.query.system.events(events =>
+    events.filter(eventFilter(name))
         .forEach(event => callback(event, events.filter(e => e.phase.isApplyExtrinsic && e.phase.asApplyExtrinsic.eq(event.phase.asApplyExtrinsic)))));
 
-const onceEvent = (event, chain = chains.basilisk, predicate = () => true) =>
+const onceEvent = (name, chain = chains.basilisk, predicate = () => true) =>
     new Promise(async resolve => {
-        let cleanup = await onEvent(event, chain, (data, siblings) => {
+        let cleanup = await onEvent(name, chain, (data, siblings) => {
             if (predicate(data.event.data)) {
                 resolve({event: data, siblings});
                 cleanup();
