@@ -50,13 +50,6 @@ async function freeTokenBalance(address, token) {
     return balance.free;
 }
 
-const waitForBalanceChange = (address, token) => new Promise(async resolve => {
-    const old = await freeTokenBalance(address, token);
-    chains.basilisk.api.query.tokens.accounts(address, token.id.basilisk, ({free}) => {
-        if (!old.sub(free).isZero()) resolve(free);
-    });
-});
-
 const eventFilter = event => ({event: {section, method}}) => event === `${section}.${method}`
 
 const onEvent = (chain, event, callback) => chain.api.query.system.events(events =>
