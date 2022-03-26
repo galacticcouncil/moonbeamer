@@ -4,6 +4,8 @@ import {u8aConcat, hexFixLength} from '@polkadot/util';
 import 'dotenv/config';
 import {contracts} from "./compile.js";
 
+const log = console.log;
+
 const tokens = {
     DEV: {
         id: {
@@ -21,49 +23,75 @@ const chains = {
     }
 };
 
-async function init() {
-    {
-        const api = await ApiPromise.create({provider: new WsProvider(chains.moonbeam.rpc)});
-        chains.moonbeam = {...chains.moonbeam, api};
-    }
-    {
-        const api = await ApiPromise.create({provider: new WsProvider(chains.basilisk.rpc)});
-        const keyring = new Keyring({type: 'sr25519'});
-        const account = keyring.addFromUri(process.env.PHRASE);
-        chains.basilisk = {...chains.basilisk, api, account, keyring};
-        const balance = await freeTokenBalance(account.address, tokens.DEV);
-        console.log(account.address, balance.toString());
-    }
-    {
-        const provider = new ethers.providers.StaticJsonRpcProvider(chains.moonbeam.ethRpc, chains.moonbeam);
-        const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-        const {Xtokens: {abi}} = contracts('Xtokens.sol');
-        const Xtokens = new ethers.Contract('0x0000000000000000000000000000000000000804', abi, wallet);
-        const {address} = wallet;
-        chains.moonbeam = {...chains.moonbeam, provider, wallet, Xtokens, abi};
-        console.log(address, String(await provider.getBalance(address)));
-    }
+async function connect() {
+    console.warn = () => null;
+    let balance = {};
+    await Promise.all([
+        async function() {
+            const api = await ApiPromise.create({provider: new WsProvider(chains.moonbeam.rpc)});
+            chains.moonbeam = {...chains.moonbeam, api};
+            log('connected to', chains.moonbeam.rpc);
+        }(),
+        async function() {
+            const api = await ApiPromise.create({provider: new WsProvider(chains.basilisk.rpc)});
+            const keyring = new Keyring({type: 'sr25519'});
+            const account = keyring.addFromUri(process.env.PHRASE);
+            chains.basilisk = {...chains.basilisk, api, account, keyring};
+            balance.basilisk = {
+                address: account.address,
+                DEV: Number(await freeTokenBalance(account.address, tokens.DEV))
+            };
+            log('connected to', chains.basilisk.rpc);
+        }(),
+        async function() {
+            const provider = new ethers.providers.StaticJsonRpcProvider(chains.moonbeam.ethRpc, chains.moonbeam);
+            const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+            const {Xtokens: {abi}} = contracts('Xtokens.sol');
+            const Xtokens = new ethers.Contract('0x0000000000000000000000000000000000000804', abi, wallet);
+            const {address} = wallet;
+            chains.moonbeam = {...chains.moonbeam, provider, wallet, Xtokens, abi};
+            balance.moonbeam = {address, DEV: Number(await provider.getBalance(address))};
+            log('connected to', chains.moonbeam.ethRpc);
+        }()]);
+    console.table(balance);
 }
 
 async function freeTokenBalance(address, token) {
-    const balance = await chains.basilisk.api.query.tokens.accounts(address, token.id.basilisk);
-    return balance.free;
+    const {free} = await chains.basilisk.api.query.tokens.accounts(address, token.id.basilisk);
+    return free;
 }
+
+const onceBalanceChange = async (address, token) => new Promise(async resolve => {
+    let initial = null;
+    let cleanup = await chains.basilisk.api.query.tokens.accounts(address, token.id.basilisk, ({free}) => {
+        if (initial === null) {
+            initial = free;
+        } else if (!initial.sub(free).isZero()) {
+            resolve(free);
+            cleanup();
+        }
+    });
+});
 
 const eventFilter = event => ({event: {section, method}}) => event === `${section}.${method}`
 
-const onEvent = (chain, event, callback) => chain.api.query.system.events(events =>
+const onEvent = (event, chain, callback) => chain.api.query.system.events(events =>
     events.filter(eventFilter(event))
-    .forEach(event => callback(event, events.filter(e => e.phase.isApplyExtrinsic && e.phase.asApplyExtrinsic.eq(event.phase.asApplyExtrinsic)))));
+        .forEach(event => callback(event, events.filter(e => e.phase.isApplyExtrinsic && e.phase.asApplyExtrinsic.eq(event.phase.asApplyExtrinsic)))));
 
 const onceEvent = (event, chain = chains.basilisk, predicate = () => true) =>
-    new Promise(resolve => onEvent(chain, event, (data, siblings) => {
-        if (predicate(data.event.data)) resolve({event: data, siblings})
-    }));
+    new Promise(async resolve => {
+        let cleanup = await onEvent(event, chain, (data, siblings) => {
+            if (predicate(data.event.data)) {
+                resolve({event: data, siblings});
+                cleanup();
+            }
+        })
+    });
 
-async function transferToParachain({token, amount, to: {parachain, address}}) {
-    const {api: {registry}} = chains.basilisk;
-    const destination = {
+const encodeDestination = ({parachain, address}) => {
+    const {registry} = chains.basilisk.api;
+    return {
         parents: 1,
         interior: [
             hexFixLength(registry.createType('ParaId', parachain).toHex(), 40, true),
@@ -72,8 +100,18 @@ async function transferToParachain({token, amount, to: {parachain, address}}) {
                 registry.createType('AccountId', address).toU8a(),
                 registry.createType('u8', 0).toU8a())
         ]
-    };
-    return chains.moonbeam.Xtokens.transfer(token.id.moonbase, amount, destination, '0xee6b2800');
+    }
+};
+
+async function transferToParachain({token, amount, to}) {
+    const tx = await chains.moonbeam.Xtokens.transfer(token.id.moonbase, amount, encodeDestination(to), '0xee6b2800');
+    log('tx sent', tx.hash);
+    const xcmpMessage = await onceEvent('ethereum.Executed', chains.moonbeam, ([, , hash]) => hash.toHex() === tx.hash)
+        .then(({siblings}) => siblings.find(eventFilter('xcmpQueue.XcmpMessageSent')).event.data[0].toHex());
+    log('xcmp sent', xcmpMessage);
+    const {siblings} = await onceEvent('xcmpQueue.Success', chains.basilisk, ([message]) => xcmpMessage === message.toHex());
+    log('xcmp received', xcmpMessage);
+    return siblings;
 }
 
 async function main() {
@@ -86,18 +124,13 @@ async function main() {
             address
         }
     }
-    console.log('sending', transfer);
-    const tx = await transferToParachain(transfer);
-    console.log('tx sent', tx.hash);
-    const xcmpMessage = await onceEvent('ethereum.Executed', chains.moonbeam, ([,,hash]) => hash.toHex() === tx.hash)
-        .then(({siblings}) => siblings.find(eventFilter('xcmpQueue.XcmpMessageSent')).event.data[0].toHex());
-    console.log('xcmp sent', xcmpMessage);
-    const {event} = await onceEvent('xcmpQueue.Success', chains.basilisk, ([message]) => xcmpMessage === message.toHex())
-        .then(({siblings}) => siblings.find(eventFilter('currencies.Deposited')));
-    console.log('xcmp received', event.toHuman());
+    await Promise.all([
+        transferToParachain(transfer).then(events => log('deposited', events.find(eventFilter('currencies.Deposited')).event.data[2].toString())),
+        onceBalanceChange(transfer.to.address, transfer.token).then(free => log('new balance', free.toString()))
+    ]);
 }
 
-init().then(main).then(process.exit);
+connect().then(main).then(process.exit);
 
 
 
