@@ -12,7 +12,19 @@ const tokens = {
             moonbase: '0x0000000000000000000000000000000000000802',
             basilisk: 1
         },
-    }
+    },
+    DAI: {
+        id: {
+            moonbase: '0x4C153BFaD26628BdbaFECBCD160A0790b1b8F212',
+            basilisk: 2
+        },
+    },
+    VEN: {
+        id: {
+            moonbase: '0xCdF746C5C86Df2c2772d2D36E227B4c0203CbA25',
+            basilisk: 2
+        },
+    },
 };
 const chains = {
     moonbeam: {
@@ -36,11 +48,10 @@ async function connect() {
             const api = await ApiPromise.create({provider: new WsProvider(chains.basilisk.rpc)});
             const keyring = new Keyring({type: 'sr25519'});
             const account = keyring.addFromUri(process.env.PHRASE);
-            const {address} = account;
             chains.basilisk = {...chains.basilisk, api, account, keyring};
             balance.basilisk = {
-                address,
-                DEV: Number(await freeTokenBalance(account, tokens.DEV))
+                account: account.address,
+                DEV: Number(await freeTokenBalance(account.address, tokens.DEV))
             };
             log('connected to', chains.basilisk.rpc);
         }(),
@@ -90,25 +101,26 @@ const onceEvent = (name, chain = chains.basilisk, predicate = () => true) =>
         })
     });
 
-const encodeDestination = ({parachain, address}) => {
-    const {registry} = chains.basilisk.api;
-    return {
-        parents: 1,
-        interior: [
-            hexFixLength(registry.createType('ParaId', parachain).toHex(), 40, true),
-            u8aConcat(
-                registry.createType('u8', 1).toU8a(),
-                registry.createType('AccountId', address).toU8a(),
-                registry.createType('u8', 0).toU8a())
-        ]
-    }
-};
+const encodeDestination = ({parachain, address}, registry = chains.basilisk.api.registry) => ({
+    parents: 1,
+    interior: [
+        hexFixLength(registry.createType('ParaId', parachain).toHex(), 40, true),
+        u8aConcat(
+            registry.createType('u8', 1).toU8a(),
+            registry.createType('AccountId', address).toU8a(),
+            registry.createType('u8', 0).toU8a())
+    ]
+});
 
 async function transferFromMoonbeam({token, amount, to}) {
-    const tx = await chains.moonbeam.Xtokens.transfer(token.id.moonbase, amount, encodeDestination(to), '0xee6b2800');
+    const tx = await chains.moonbeam.Xtokens.transfer(token.id.moonbase, amount, encodeDestination(to), '0xee6b2800', {gasLimit: '100000'});
     log('tx sent', tx.hash);
-    const xcmpMessage = await onceEvent('ethereum.Executed', chains.moonbeam, ([, , hash]) => hash.toHex() === tx.hash)
-        .then(({siblings}) => siblings.find(eventFilter('xcmpQueue.XcmpMessageSent')).event.data[0].toHex());
+    const execution = await onceEvent('ethereum.Executed', chains.moonbeam, ([, , hash]) => hash.toHex() === tx.hash);
+    const xcmpMessage = execution.siblings.find(eventFilter('xcmpQueue.XcmpMessageSent'))?.event.data[0].toHex();
+    if (!xcmpMessage) {
+        log('no xcmp message sent');
+        throw execution.event.event.toHuman();
+    }
     log('xcmp sent', xcmpMessage);
     const {siblings} = await onceEvent('xcmpQueue.Success', chains.basilisk, ([message]) => xcmpMessage === message.toHex());
     log('xcmp received', xcmpMessage);
@@ -131,7 +143,13 @@ async function main() {
     ]);
 }
 
-connect().then(main).then(process.exit);
+connect()
+    .then(main)
+    .then(process.exit)
+    .catch(e => {
+        log(e);
+        process.exit(1);
+    });
 
 
 
